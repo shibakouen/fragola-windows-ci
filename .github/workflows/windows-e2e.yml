@@ -1,0 +1,52 @@
+name: windows-e2e
+
+# Tests the PUBLISHED Windows installer on a real Windows machine:
+# silent NSIS install → drive the installed exe through the new-tester
+# journey with Playwright. No secrets needed (sign-up is open; runner has
+# no audio hardware, so mic/loopback degradation is expected and recorded).
+on:
+  workflow_dispatch:
+
+jobs:
+  installer-journey:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Download published installer
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://tkd2vapgc8gjrjb3.public.blob.vercel-storage.com/downloads/Fragola-1.0.0-x64-setup.exe" -OutFile fragola-setup.exe
+          (Get-Item fragola-setup.exe).Length
+
+      - name: Install silently
+        shell: pwsh
+        run: |
+          Start-Process -FilePath ".\fragola-setup.exe" -ArgumentList "/S" -Wait
+          Start-Sleep -Seconds 5
+          $exe = "$env:LOCALAPPDATA\Programs\Fragola\Fragola.exe"
+          if (!(Test-Path $exe)) {
+            Write-Host "Default path missing — searching…"
+            Get-ChildItem "$env:LOCALAPPDATA\Programs" -Recurse -Filter "Fragola.exe" -ErrorAction SilentlyContinue | Select-Object -First 5
+            exit 1
+          }
+          Write-Host "Installed at $exe"
+          echo "FRAGOLA_EXE=$exe" >> $env:GITHUB_ENV
+
+      - name: Install Playwright (library only)
+        run: npm install playwright@1.58.2
+
+      - name: Run Windows journey against installed exe
+        run: node tests/ci-windows-journey.mjs
+
+      - name: Upload screenshots + result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-journey
+          path: ci-screens/
