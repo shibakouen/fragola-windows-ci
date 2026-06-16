@@ -3,7 +3,6 @@ on:
   workflow_dispatch:
 env:
   XDG_RUNTIME_DIR: /tmp/pulse-rt
-  PULSE_SERVER: unix:/tmp/pulse-rt/pulse/native
 jobs:
   monitor-capture:
     runs-on: ubuntu-22.04
@@ -27,6 +26,8 @@ jobs:
           sleep 4
           echo "sink-inputs:"; pactl list short sink-inputs
       - name: Capture monitor in REAL Electron (same engine as the app) under xvfb
+        env:
+          PULSE_SERVER: unix:/tmp/pulse-rt/pulse/native
         run: |
           npm init -y >/dev/null 2>&1
           npm i -D electron@40.6.1 >/dev/null 2>&1
@@ -34,7 +35,7 @@ jobs:
           const { app, BrowserWindow, session, ipcMain } = require('electron')
           app.commandLine.appendSwitch('no-sandbox')
           app.commandLine.appendSwitch('use-fake-ui-for-media-stream')
-          app.commandLine.appendSwitch('disable-features','AudioServiceOutOfProcess')
+          app.commandLine.appendSwitch('disable-features', 'AudioServiceOutOfProcess')
           app.whenReady().then(() => {
             session.defaultSession.setPermissionRequestHandler((_wc,_p,cb)=>cb(true))
             const win = new BrowserWindow({ show:false, webPreferences:{ nodeIntegration:true, contextIsolation:false } })
@@ -62,4 +63,4 @@ jobs:
           })()
           </script>
           JS
-          xvfb-run -a npx electron main.cjs 2>/tmp/electron.err || { echo "=== electron.err ==="; grep -iv "dbus\|Floss\|GLImpl\|gpu\|Vulkan\|libva" /tmp/electron.err | tail -20; exit 1; }
+          xvfb-run -a npx electron main.cjs
