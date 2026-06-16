@@ -4,72 +4,38 @@ on:
 env:
   XDG_RUNTIME_DIR: /tmp/pulse-rt
 jobs:
-  monitor-capture:
+  parec-monitor-capture:
     runs-on: ubuntu-22.04
     steps:
-      - name: Install PulseAudio + ffmpeg + xvfb + electron deps
+      - name: Install PulseAudio + ffmpeg
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq pulseaudio pulseaudio-utils ffmpeg xvfb \
-            libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libgtk-3-0 \
-            libgbm1 libasound2 libxshmfence1 libxdamage1 libxrandr2 libxcomposite1 libxfixes3
-      - name: PulseAudio + null-sink + tone (monitor = default source)
+          sudo apt-get install -y -qq pulseaudio pulseaudio-utils ffmpeg python3
+      - name: PulseAudio + null-sink + tone, then parec-capture the monitor (the app's exact mechanism)
         run: |
           mkdir -p "$XDG_RUNTIME_DIR"
           pulseaudio --start --exit-idle-time=-1 --disable-shm=1
           sleep 3
           pactl load-module module-null-sink sink_name=virtsink sink_properties=device.description=VirtualSink
           pactl set-default-sink virtsink
-          pactl set-default-source virtsink.monitor
+          echo "=== sources ==="; pactl list short sources
           ffmpeg -nostdin -f lavfi -i "sine=frequency=440:duration=5:sample_rate=48000" -ac 2 /tmp/tone.wav -y >/dev/null 2>&1
           nohup bash -c 'while true; do paplay --device=virtsink /tmp/tone.wav 2>>/tmp/paplay.err || sleep 1; done' >/dev/null 2>&1 &
-          sleep 4
-          echo "sink-inputs:"; pactl list short sink-inputs
-      - name: Capture monitor in REAL Electron (same engine as the app) under xvfb
-        env:
-          PULSE_SERVER: unix:/tmp/pulse-rt/pulse/native
-        run: |
-          npm init -y >/dev/null 2>&1
-          npm i -D electron@40.6.1 >/dev/null 2>&1
-          cat > main.cjs <<'JS'
-          const { app, BrowserWindow, session, ipcMain } = require('electron')
-          app.commandLine.appendSwitch('no-sandbox')
-          app.commandLine.appendSwitch('use-fake-ui-for-media-stream')
-          app.commandLine.appendSwitch('disable-features', 'AudioServiceOutOfProcess')
-          app.whenReady().then(() => {
-            session.defaultSession.setPermissionRequestHandler((_wc,_p,cb)=>cb(true))
-            const win = new BrowserWindow({ show:false, webPreferences:{ nodeIntegration:true, contextIsolation:false } })
-            win.loadFile('renderer.html')
-            ipcMain.on('result', (_e, r) => { console.log('RESULT', JSON.stringify(r)); app.exit(r.ok?0:1) })
-            setTimeout(()=>{ console.log('RESULT', JSON.stringify({ok:false,reason:'timeout'})); app.exit(1) }, 30000)
-          })
-          JS
-          cat > renderer.html <<'JS'
-          <script>
-          const { ipcRenderer } = require('electron')
-          ;(async () => {
-            const out = { ok:false }
-            try {
-              let pre = await navigator.mediaDevices.enumerateDevices()
-              out.preLabels = pre.map(d=>d.kind+':'+(d.label||'(no label)'))
-              let gumErr = null, stream = null
-              try { stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}}) } catch(e){ gumErr = String(e) }
-              out.gumDefaultError = gumErr
-              const devs = await navigator.mediaDevices.enumerateDevices()
-              out.all = devs.map(d=>d.kind+':'+(d.label||'(no label)'))
-              const mon = devs.find(d=>d.kind==='audioinput' && /monitor/i.test(d.label))
-              if (mon) {
-                if (stream) stream.getTracks().forEach(t=>t.stop())
-                stream = await navigator.mediaDevices.getUserMedia({audio:{deviceId:{exact:mon.deviceId},echoCancellation:false,noiseSuppression:false,autoGainControl:false}})
-                out.via = 'deviceId: '+mon.label
-              } else if (stream) { out.via = 'default' } else { out.reason='no monitor + no default'; ipcRenderer.send('result',out); return }
-              const ac = new AudioContext(); const an = ac.createAnalyser(); an.fftSize=2048; ac.createMediaStreamSource(stream).connect(an)
-              const buf = new Float32Array(an.fftSize); let peak=0; const t0=performance.now()
-              while(performance.now()-t0<3500){ an.getFloatTimeDomainData(buf); let s=0; for(const v of buf)s+=v*v; const rms=Math.sqrt(s/buf.length); if(rms>peak)peak=rms; await new Promise(r=>setTimeout(r,80)) }
-              out.ok = peak>0.01; out.peak=Number(peak.toFixed(4))
-            } catch(e){ out.reason = String(e) }
-            ipcRenderer.send('result', out)
-          })()
-          </script>
-          JS
-          xvfb-run -a npx electron main.cjs
+          sleep 3
+          echo "=== sink-inputs (tone playing?) ==="; pactl list short sink-inputs
+          # THE APP'S MECHANISM: parec on the default sink's monitor → raw 16k mono s16le
+          timeout 4 parec --format=s16le --rate=16000 --channels=1 --raw --device=@DEFAULT_MONITOR@ > /tmp/cap.raw || true
+          echo "captured bytes: $(wc -c < /tmp/cap.raw)"
+          python3 - <<'PY'
+          import struct, math, sys
+          d = open('/tmp/cap.raw','rb').read()
+          n = len(d)//2
+          if n == 0:
+              print("RESULT", '{"ok":false,"reason":"no PCM captured"}'); sys.exit(1)
+          s = struct.unpack('<%dh' % n, d[:n*2])
+          rms = math.sqrt(sum(x*x for x in s)/n)/32768
+          peak = max(abs(x) for x in s)/32768
+          ok = rms > 0.01
+          print("RESULT", '{"ok":%s,"rms":%.4f,"peak":%.4f,"samples":%d}' % (str(ok).lower(), rms, peak, n))
+          sys.exit(0 if ok else 1)
+          PY
