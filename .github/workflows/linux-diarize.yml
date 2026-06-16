@@ -1,0 +1,54 @@
+name: linux-diarize
+on:
+  workflow_dispatch:
+    inputs:
+      appimage:
+        description: AppImage URL
+        required: true
+        default: https://tkd2vapgc8gjrjb3.public.blob.vercel-storage.com/downloads/Lamponi-1.0.0-x86_64.AppImage
+jobs:
+  diarize-load:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
+            libgtk-3-0 libgbm1 libasound2 libxshmfence1 libxdamage1 libxrandr2 libxcomposite1 libxfixes3 libgomp1
+      - name: Download + extract AppImage and the test audio
+        run: |
+          curl -fL -o L.AppImage "${{ github.event.inputs.appimage }}"
+          chmod +x L.AppImage
+          ./L.AppImage --appimage-extract >/dev/null
+          ls squashfs-root/lamponi
+          curl -fL -o mono2p.wav "https://tkd2vapgc8gjrjb3.public.blob.vercel-storage.com/downloads/_test/mono2p.wav"
+          ls -la mono2p.wav
+      - name: Launch + assert sherpa loads on Linux (method sherpa+live, no Deepgram needed)
+        run: |
+          npm init -y >/dev/null 2>&1
+          npm i -D playwright >/dev/null 2>&1
+          cat > t.mjs <<'JS'
+          import { _electron } from 'playwright'
+          import { readFileSync } from 'fs'
+          const wav = readFileSync('mono2p.wav')
+          const b64 = Buffer.from(wav.buffer, wav.byteOffset + 44, wav.length - 44).toString('base64')
+          let mainLog = ''
+          const app = await _electron.launch({ executablePath: 'squashfs-root/lamponi', args: ['--no-sandbox'], env: { ...process.env, FRAGOLA_USERDATA_DIR: '/tmp/prof' } })
+          app.process().stderr.on('data', d => { mainLog += String(d) })
+          let page = await app.firstWindow()
+          if (page.url().includes('floating')) page = (await app.windows()).find((w) => !w.url().includes('floating')) ?? page
+          await page.waitForLoadState('domcontentloaded'); await page.waitForTimeout(2000)
+          const r = await page.evaluate(async (b64) => {
+            const bin = atob(b64); const by = new Uint8Array(bin.length); for (let i=0;i<bin.length;i++) by[i]=bin.charCodeAt(i)
+            const i16 = new Int16Array(by.buffer); const f = new Float32Array(i16.length); for (let i=0;i<i16.length;i++) f[i]=i16[i]/32768
+            const live = [0,1].map(b => ({ start: b*60, end: b*60+60, words: Array.from({length:30}, (_,i)=>({ word:'w'+i, start:b*60+i*2, end:b*60+i*2+1, punctuated_word:'W'+i })) }))
+            return (await window.fragola.diarize.reprocess(f.buffer, 2, 'multi', undefined, live)).data
+          }, b64)
+          console.log('RESULT', JSON.stringify({ method: r?.method, speakers: r?.speakers?.length }))
+          const ok = r?.method === 'sherpa+live' && r?.speakers?.length === 2
+          console.log(ok ? 'LINUX SHERPA LOADS — PASS' : 'FAIL: sherpa did not load (method=' + r?.method + ')')
+          if (/\[Diar\]/.test(mainLog)) console.log(mainLog.split('\n').filter(l=>/\[Diar\]/.test(l)).slice(0,4).join('\n'))
+          await app.close().catch(()=>{})
+          process.exit(ok ? 0 : 1)
+          JS
+          xvfb-run -a node t.mjs
