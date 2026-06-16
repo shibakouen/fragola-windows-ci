@@ -1,0 +1,49 @@
+name: linux-e2e
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: AppImage URL
+        required: true
+        default: https://tkd2vapgc8gjrjb3.public.blob.vercel-storage.com/downloads/Lamponi-1.0.0-x86_64.AppImage
+jobs:
+  launch:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install runtime deps + xvfb
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb imagemagick libnss3 libatk1.0-0 libatk-bridge2.0-0 \
+            libcups2 libdrm2 libgtk-3-0 libgbm1 libasound2 libxshmfence1 libxdamage1 \
+            libxrandr2 libxcomposite1 libxfixes3 libpango-1.0-0 libcairo2
+      - name: Download AppImage
+        run: |
+          curl -fL -o Lamponi.AppImage "${{ github.event.inputs.url }}"
+          chmod +x Lamponi.AppImage
+          ls -la Lamponi.AppImage
+          file Lamponi.AppImage
+      - name: Launch headless under xvfb
+        run: |
+          Xvfb :99 -screen 0 1280x800x24 >/tmp/xvfb.log 2>&1 &
+          export DISPLAY=:99
+          sleep 3
+          ./Lamponi.AppImage --appimage-extract-and-run --no-sandbox > applog.txt 2>&1 &
+          APP=$!
+          sleep 22
+          if kill -0 $APP 2>/dev/null; then
+            echo "RESULT: app process ALIVE after 22s — launched OK"
+            ELECTRON_PROCS=$(pgrep -fc 'lamponi|chrome_crashpad|Lamponi' || echo 0)
+            echo "electron-related processes: $ELECTRON_PROCS"
+          else
+            echo "RESULT: app EXITED early — FAILED"; tail -50 applog.txt; exit 1
+          fi
+          import -window root launch.png 2>/dev/null && echo "screenshot captured" || echo "no screenshot"
+          echo "=== app log (last 30) ==="; tail -30 applog.txt
+          pkill -f Lamponi 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-launch
+          path: |
+            launch.png
+            applog.txt
