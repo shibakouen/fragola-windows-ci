@@ -48,18 +48,27 @@ jobs:
           <script>
           const { ipcRenderer } = require('electron')
           ;(async () => {
+            const out = { ok:false }
             try {
-              let stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}})
+              let pre = await navigator.mediaDevices.enumerateDevices()
+              out.preLabels = pre.map(d=>d.kind+':'+(d.label||'(no label)'))
+              let gumErr = null, stream = null
+              try { stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}}) } catch(e){ gumErr = String(e) }
+              out.gumDefaultError = gumErr
               const devs = await navigator.mediaDevices.enumerateDevices()
-              const inputs = devs.filter(d=>d.kind==='audioinput').map(d=>d.label)
-              const mon = devs.find(d=>d.kind==='audioinput' && /monitor/i.test(d.label) && d.deviceId!=='default' && d.deviceId!=='communications')
-              let via='default-source(monitor)'
-              if (mon) { stream.getTracks().forEach(t=>t.stop()); stream = await navigator.mediaDevices.getUserMedia({audio:{deviceId:{exact:mon.deviceId},echoCancellation:false,noiseSuppression:false,autoGainControl:false}}); via='deviceId: '+mon.label }
+              out.all = devs.map(d=>d.kind+':'+(d.label||'(no label)'))
+              const mon = devs.find(d=>d.kind==='audioinput' && /monitor/i.test(d.label))
+              if (mon) {
+                if (stream) stream.getTracks().forEach(t=>t.stop())
+                stream = await navigator.mediaDevices.getUserMedia({audio:{deviceId:{exact:mon.deviceId},echoCancellation:false,noiseSuppression:false,autoGainControl:false}})
+                out.via = 'deviceId: '+mon.label
+              } else if (stream) { out.via = 'default' } else { out.reason='no monitor + no default'; ipcRenderer.send('result',out); return }
               const ac = new AudioContext(); const an = ac.createAnalyser(); an.fftSize=2048; ac.createMediaStreamSource(stream).connect(an)
               const buf = new Float32Array(an.fftSize); let peak=0; const t0=performance.now()
               while(performance.now()-t0<3500){ an.getFloatTimeDomainData(buf); let s=0; for(const v of buf)s+=v*v; const rms=Math.sqrt(s/buf.length); if(rms>peak)peak=rms; await new Promise(r=>setTimeout(r,80)) }
-              ipcRenderer.send('result',{ok:peak>0.01,peak:Number(peak.toFixed(4)),via,inputs})
-            } catch(e){ ipcRenderer.send('result',{ok:false,reason:String(e)}) }
+              out.ok = peak>0.01; out.peak=Number(peak.toFixed(4))
+            } catch(e){ out.reason = String(e) }
+            ipcRenderer.send('result', out)
           })()
           </script>
           JS
