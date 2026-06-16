@@ -1,0 +1,51 @@
+name: linux-deb
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: .deb URL
+        required: true
+        default: https://tkd2vapgc8gjrjb3.public.blob.vercel-storage.com/downloads/Lamponi-1.0.0-amd64.deb
+jobs:
+  deb-install:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Prove NO FUSE — remove libfuse2 if present
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get remove -y -qq libfuse2 fuse 2>/dev/null || true
+          echo "fuse packages after removal:"; (dpkg -l | grep -i 'libfuse\|^ii  fuse') || echo "  (none installed — good, deb must not need FUSE)"
+          sudo apt-get install -y -qq xvfb imagemagick
+      - name: Download the .deb
+        run: |
+          curl -fL -o Lamponi.deb "${{ github.event.inputs.url }}"
+          ls -la Lamponi.deb; file Lamponi.deb
+      - name: Install the .deb (apt resolves deps — no FUSE involved)
+        run: |
+          sudo apt-get install -y ./Lamponi.deb
+          echo "=== installed launcher (absolute path) ==="; which lamponi; ls -la /opt/Lamponi/lamponi
+          echo "=== .desktop Exec (must be absolute) ==="; cat /usr/share/applications/lamponi.desktop
+      - name: Launch headless via the installed /usr/bin/lamponi
+        run: |
+          Xvfb :99 -screen 0 1280x800x24 >/tmp/xvfb.log 2>&1 &
+          export DISPLAY=:99
+          sleep 3
+          lamponi --no-sandbox > applog.txt 2>&1 &
+          APP=$!
+          sleep 22
+          if kill -0 $APP 2>/dev/null; then
+            echo "RESULT: .deb-installed app ALIVE after 22s — launched OK with NO FUSE"
+            echo "electron procs: $(pgrep -fc 'lamponi|Lamponi|chrome_crashpad' || echo 0)"
+          else
+            echo "RESULT: app EXITED early — FAILED"; tail -60 applog.txt; exit 1
+          fi
+          import -window root launch.png 2>/dev/null && echo "screenshot captured" || echo "no screenshot"
+          echo "=== app log (last 30) ==="; tail -30 applog.txt
+          pkill -f lamponi 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-deb-launch
+          path: |
+            launch.png
+            applog.txt
