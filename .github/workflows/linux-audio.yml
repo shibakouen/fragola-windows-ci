@@ -13,20 +13,22 @@ jobs:
           sudo apt-get install -y -qq pulseaudio pulseaudio-utils ffmpeg \
             libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libgtk-3-0 \
             libgbm1 libasound2 libxshmfence1 libxdamage1 libxrandr2 libxcomposite1 libxfixes3
-      - name: Start PulseAudio + null-sink + loop a tone into it
+      - name: PulseAudio + null-sink + tone (monitor = default source)
         run: |
           mkdir -p "$XDG_RUNTIME_DIR"
           pulseaudio --start --exit-idle-time=-1 --disable-shm=1
           sleep 3
           pactl load-module module-null-sink sink_name=virtsink sink_properties=device.description=VirtualSink
           pactl set-default-sink virtsink
-          echo "=== sources ==="; pactl list short sources
+          pactl set-default-source virtsink.monitor
           ffmpeg -nostdin -f lavfi -i "sine=frequency=440:duration=5:sample_rate=48000" -ac 2 /tmp/tone.wav -y >/dev/null 2>&1
-          nohup bash -c 'while true; do paplay --device=virtsink /tmp/tone.wav; done' >/tmp/paplay.log 2>&1 &
+          ls -la /tmp/tone.wav
+          nohup bash -c 'while true; do paplay --device=virtsink /tmp/tone.wav 2>>/tmp/paplay.err || sleep 1; done' >/dev/null 2>&1 &
           sleep 4
           echo "=== sink-inputs (tone playing?) ==="; pactl list short sink-inputs
-          echo "=== paplay log ==="; cat /tmp/paplay.log || true
-      - name: Capture the monitor in Chromium (localhost secure ctx) and measure RMS
+          echo "=== default source ==="; pactl get-default-source
+          echo "=== paplay.err ==="; cat /tmp/paplay.err 2>/dev/null || echo "(none)"
+      - name: Capture monitor in Chromium and measure RMS
         run: |
           npm init -y >/dev/null 2>&1
           npm i -D playwright >/dev/null 2>&1
@@ -40,17 +42,22 @@ jobs:
           await p.goto('http://localhost:8099/')
           const r = await p.evaluate(async () => {
             if (!navigator.mediaDevices) return { ok:false, reason:'no mediaDevices' }
-            await navigator.mediaDevices.getUserMedia({audio:true}).then(s=>s.getTracks().forEach(t=>t.stop()))
+            // default source IS the monitor now → this both grants permission and is a valid capture
+            let stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}})
             const devs = await navigator.mediaDevices.enumerateDevices()
             const inputs = devs.filter(d=>d.kind==='audioinput').map(d=>d.label)
             const mon = devs.find(d=>d.kind==='audioinput' && /monitor/i.test(d.label) && d.deviceId!=='default' && d.deviceId!=='communications')
-            if (!mon) return { ok:false, reason:'no monitor', inputs }
-            const stream = await navigator.mediaDevices.getUserMedia({audio:{deviceId:{exact:mon.deviceId}, echoCancellation:false, noiseSuppression:false, autoGainControl:false}})
+            let via = 'default-source(monitor)'
+            if (mon) {
+              stream.getTracks().forEach(t=>t.stop())
+              stream = await navigator.mediaDevices.getUserMedia({audio:{deviceId:{exact:mon.deviceId},echoCancellation:false,noiseSuppression:false,autoGainControl:false}})
+              via = 'deviceId: '+mon.label
+            }
             const ac = new AudioContext(); const an = ac.createAnalyser(); an.fftSize = 2048
             ac.createMediaStreamSource(stream).connect(an)
             const buf = new Float32Array(an.fftSize); let peak = 0; const t0 = performance.now()
             while (performance.now()-t0 < 3500) { an.getFloatTimeDomainData(buf); let s=0; for (const v of buf) s+=v*v; const rms=Math.sqrt(s/buf.length); if (rms>peak) peak=rms; await new Promise(r=>setTimeout(r,80)) }
-            return { ok: peak > 0.01, peak: Number(peak.toFixed(4)), monitor: mon.label, inputs }
+            return { ok: peak > 0.01, peak: Number(peak.toFixed(4)), via, inputs }
           })
           console.log('RESULT', JSON.stringify(r))
           srv.close(); await b.close(); process.exit(r.ok ? 0 : 1)
