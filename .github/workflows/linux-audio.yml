@@ -3,6 +3,7 @@ on:
   workflow_dispatch:
 env:
   XDG_RUNTIME_DIR: /tmp/pulse-rt
+  PULSE_SERVER: unix:/tmp/pulse-rt/pulse/native
 jobs:
   monitor-capture:
     runs-on: ubuntu-22.04
@@ -33,6 +34,7 @@ jobs:
           const { app, BrowserWindow, session, ipcMain } = require('electron')
           app.commandLine.appendSwitch('no-sandbox')
           app.commandLine.appendSwitch('use-fake-ui-for-media-stream')
+          app.commandLine.appendSwitch('disable-features','AudioServiceOutOfProcess')
           app.whenReady().then(() => {
             session.defaultSession.setPermissionRequestHandler((_wc,_p,cb)=>cb(true))
             const win = new BrowserWindow({ show:false, webPreferences:{ nodeIntegration:true, contextIsolation:false } })
