@@ -7,10 +7,10 @@ jobs:
   monitor-capture:
     runs-on: ubuntu-22.04
     steps:
-      - name: Install PulseAudio + ffmpeg + chromium deps
+      - name: Install PulseAudio + ffmpeg + xvfb + electron deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq pulseaudio pulseaudio-utils ffmpeg \
+          sudo apt-get install -y -qq pulseaudio pulseaudio-utils ffmpeg xvfb \
             libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libgtk-3-0 \
             libgbm1 libasound2 libxshmfence1 libxdamage1 libxrandr2 libxcomposite1 libxfixes3
       - name: PulseAudio + null-sink + tone (monitor = default source)
@@ -22,44 +22,42 @@ jobs:
           pactl set-default-sink virtsink
           pactl set-default-source virtsink.monitor
           ffmpeg -nostdin -f lavfi -i "sine=frequency=440:duration=5:sample_rate=48000" -ac 2 /tmp/tone.wav -y >/dev/null 2>&1
-          ls -la /tmp/tone.wav
           nohup bash -c 'while true; do paplay --device=virtsink /tmp/tone.wav 2>>/tmp/paplay.err || sleep 1; done' >/dev/null 2>&1 &
           sleep 4
-          echo "=== sink-inputs (tone playing?) ==="; pactl list short sink-inputs
-          echo "=== default source ==="; pactl get-default-source
-          echo "=== paplay.err ==="; cat /tmp/paplay.err 2>/dev/null || echo "(none)"
-      - name: Capture monitor in Chromium and measure RMS
+          echo "sink-inputs:"; pactl list short sink-inputs
+      - name: Capture monitor in REAL Electron (same engine as the app) under xvfb
         run: |
           npm init -y >/dev/null 2>&1
-          npm i -D playwright >/dev/null 2>&1
-          npx playwright install chromium >/dev/null 2>&1
-          cat > test.mjs <<'JS'
-          import { chromium } from 'playwright'
-          import http from 'http'
-          const srv = http.createServer((_, res) => res.end('<!doctype html><title>cap</title>ok')).listen(8099)
-          const b = await chromium.launch({ args: ['--no-sandbox','--use-fake-ui-for-media-stream','--autoplay-policy=no-user-gesture-required'] })
-          const p = await (await b.newContext()).newPage()
-          await p.goto('http://localhost:8099/')
-          const r = await p.evaluate(async () => {
-            if (!navigator.mediaDevices) return { ok:false, reason:'no mediaDevices' }
-            // default source IS the monitor now → this both grants permission and is a valid capture
-            let stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}})
-            const devs = await navigator.mediaDevices.enumerateDevices()
-            const inputs = devs.filter(d=>d.kind==='audioinput').map(d=>d.label)
-            const mon = devs.find(d=>d.kind==='audioinput' && /monitor/i.test(d.label) && d.deviceId!=='default' && d.deviceId!=='communications')
-            let via = 'default-source(monitor)'
-            if (mon) {
-              stream.getTracks().forEach(t=>t.stop())
-              stream = await navigator.mediaDevices.getUserMedia({audio:{deviceId:{exact:mon.deviceId},echoCancellation:false,noiseSuppression:false,autoGainControl:false}})
-              via = 'deviceId: '+mon.label
-            }
-            const ac = new AudioContext(); const an = ac.createAnalyser(); an.fftSize = 2048
-            ac.createMediaStreamSource(stream).connect(an)
-            const buf = new Float32Array(an.fftSize); let peak = 0; const t0 = performance.now()
-            while (performance.now()-t0 < 3500) { an.getFloatTimeDomainData(buf); let s=0; for (const v of buf) s+=v*v; const rms=Math.sqrt(s/buf.length); if (rms>peak) peak=rms; await new Promise(r=>setTimeout(r,80)) }
-            return { ok: peak > 0.01, peak: Number(peak.toFixed(4)), via, inputs }
+          npm i -D electron@40.6.1 >/dev/null 2>&1
+          cat > main.cjs <<'JS'
+          const { app, BrowserWindow, session, ipcMain } = require('electron')
+          app.commandLine.appendSwitch('no-sandbox')
+          app.commandLine.appendSwitch('use-fake-ui-for-media-stream')
+          app.whenReady().then(() => {
+            session.defaultSession.setPermissionRequestHandler((_wc,_p,cb)=>cb(true))
+            const win = new BrowserWindow({ show:false, webPreferences:{ nodeIntegration:true, contextIsolation:false } })
+            win.loadFile('renderer.html')
+            ipcMain.on('result', (_e, r) => { console.log('RESULT', JSON.stringify(r)); app.exit(r.ok?0:1) })
+            setTimeout(()=>{ console.log('RESULT', JSON.stringify({ok:false,reason:'timeout'})); app.exit(1) }, 30000)
           })
-          console.log('RESULT', JSON.stringify(r))
-          srv.close(); await b.close(); process.exit(r.ok ? 0 : 1)
           JS
-          node test.mjs
+          cat > renderer.html <<'JS'
+          <script>
+          const { ipcRenderer } = require('electron')
+          ;(async () => {
+            try {
+              let stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false}})
+              const devs = await navigator.mediaDevices.enumerateDevices()
+              const inputs = devs.filter(d=>d.kind==='audioinput').map(d=>d.label)
+              const mon = devs.find(d=>d.kind==='audioinput' && /monitor/i.test(d.label) && d.deviceId!=='default' && d.deviceId!=='communications')
+              let via='default-source(monitor)'
+              if (mon) { stream.getTracks().forEach(t=>t.stop()); stream = await navigator.mediaDevices.getUserMedia({audio:{deviceId:{exact:mon.deviceId},echoCancellation:false,noiseSuppression:false,autoGainControl:false}}); via='deviceId: '+mon.label }
+              const ac = new AudioContext(); const an = ac.createAnalyser(); an.fftSize=2048; ac.createMediaStreamSource(stream).connect(an)
+              const buf = new Float32Array(an.fftSize); let peak=0; const t0=performance.now()
+              while(performance.now()-t0<3500){ an.getFloatTimeDomainData(buf); let s=0; for(const v of buf)s+=v*v; const rms=Math.sqrt(s/buf.length); if(rms>peak)peak=rms; await new Promise(r=>setTimeout(r,80)) }
+              ipcRenderer.send('result',{ok:peak>0.01,peak:Number(peak.toFixed(4)),via,inputs})
+            } catch(e){ ipcRenderer.send('result',{ok:false,reason:String(e)}) }
+          })()
+          </script>
+          JS
+          xvfb-run -a npx electron main.cjs 2>/tmp/electron.err || { echo "=== electron.err ==="; grep -iv "dbus\|Floss\|GLImpl\|gpu\|Vulkan\|libva" /tmp/electron.err | tail -20; exit 1; }
