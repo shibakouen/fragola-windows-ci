@@ -1,0 +1,64 @@
+name: windows-nsis-verify
+
+# Minimal, unambiguous proof that the PUBLISHED Lamponi Windows installer passes
+# the NSIS integrity check and installs on real Windows. This is the exact path a
+# tester hit when they got "NSIS Error: installer integrity check has failed".
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Lamponi version to verify (e.g. 1.1.5)"
+        required: true
+        default: "1.1.5"
+
+jobs:
+  nsis-verify:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download published installer + check it is a complete PE
+        shell: pwsh
+        run: |
+          $v = "${{ github.event.inputs.version }}"
+          $url = "https://tkd2vapgc8gjrjb3.public.blob.vercel-storage.com/downloads/Lamponi-$v-x64-setup.exe"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile lamponi-setup.exe
+          $len = (Get-Item lamponi-setup.exe).Length
+          Write-Host "Downloaded bytes: $len"
+          if ($len -lt 50000000) { throw "Installer too small ($len) - download incomplete" }
+          $bytes = [System.IO.File]::ReadAllBytes("lamponi-setup.exe")
+          $hdr = [System.Text.Encoding]::ASCII.GetString($bytes[0..1])
+          Write-Host "PE header: $hdr"
+          if ($hdr -ne "MZ") { throw "Not a PE executable (header=$hdr)" }
+
+      - name: Silent install -- THIS is the NSIS integrity gate
+        shell: pwsh
+        run: |
+          # A corrupt NSIS aborts before installing anything (and may pop a fatal
+          # "integrity check failed" dialog). Wait with a hard timeout so a hang
+          # is detected instead of stalling the runner.
+          $p = Start-Process -FilePath ".\lamponi-setup.exe" -ArgumentList "/S" -PassThru
+          if (-not $p.WaitForExit(120000)) {
+            Write-Host "Installer did not exit in 120s - killing (likely fatal NSIS dialog)"
+            $p.Kill()
+            throw "Installer hung - NSIS integrity / fatal dialog"
+          }
+          Write-Host "Installer exit code: $($p.ExitCode)"
+          Start-Sleep -Seconds 5
+
+      - name: Verify Lamponi.exe actually installed
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "$env:LOCALAPPDATA\Programs\Lamponi\Lamponi.exe",
+            "$env:LOCALAPPDATA\Programs\lamponi\Lamponi.exe",
+            "${env:ProgramFiles}\Lamponi\Lamponi.exe"
+          )
+          $exe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $exe) {
+            Write-Host "Lamponi.exe NOT found - searching..."
+            Get-ChildItem "$env:LOCALAPPDATA\Programs" -Recurse -Filter "Lamponi.exe" -ErrorAction SilentlyContinue | Select-Object -First 5
+            throw "Install produced no Lamponi.exe - installer failed (NSIS integrity or packaging)"
+          }
+          Write-Host "PASS - installed at $exe"
+          Write-Host "Installed exe size: $((Get-Item $exe).Length) bytes"
