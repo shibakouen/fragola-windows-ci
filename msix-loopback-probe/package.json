@@ -1,0 +1,19 @@
+{
+  "name": "msix-loopback-probe",
+  "version": "1.0.0",
+  "description": "Controlled test: does Chromium/Electron WASAPI loopback audio capture survive MSIX containerization?",
+  "main": "main.js",
+  "author": "Murasaki Italia",
+  "license": "UNLICENSED",
+  "scripts": {
+    "pack:plain": "electron-builder --win dir",
+    "pack:msix": "electron-builder --win appx"
+  },
+  "dependencies": {
+    "electron-audio-loopback": "1.0.6"
+  },
+  "devDependencies": {
+    "electron": "40.4.1",
+    "electron-builder": "26.8.1"
+  }
+}

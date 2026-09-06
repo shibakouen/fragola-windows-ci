@@ -1,0 +1,34 @@
+appId: com.murasaki.msixloopbackprobe
+productName: LoopbackProbe
+npmRebuild: false
+directories:
+  output: dist
+files:
+  - main.js
+  - preload.js
+  - renderer.js
+  - index.html
+  - package.json
+win:
+  target:
+    - target: dir
+      arch: [x64]
+    - target: appx
+      arch: [x64]
+appx:
+  # For the experiment these only have to be internally consistent: `publisher`
+  # must match the subject of whatever certificate signs the package. A real
+  # Store submission replaces these with the values Partner Center reserves.
+  identityName: MurasakiItalia.LoopbackProbe
+  publisher: CN=ProbePublisher
+  publisherDisplayName: Murasaki Italia
+  applicationId: LoopbackProbe
+  displayName: Loopback Probe
+  backgroundColor: "#1a1a1a"
+  # THE point of the experiment. A packaged app reaches privacy-gated audio
+  # only through declared capabilities, unlike an unpackaged desktop app.
+  capabilities:
+    - microphone
+    - internetClient
+  languages:
+    - en-US
